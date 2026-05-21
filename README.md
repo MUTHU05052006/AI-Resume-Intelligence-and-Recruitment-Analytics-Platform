@@ -57,5 +57,22 @@ The platform automates candidate management, resume screening, AI-based evaluati
 - QR-Based Registration
 - Tableau Business Intelligence Dashboard
 
-## License
-MIT License
+## Project Screenshots
+
+### Main UI
+![Main UI](screenshots/MAIN%20UI.jpeg)
+
+### Excel Auto Entry System
+![Excel Auto Entry System](screenshots/EXCEL%20AUTO%20ENTRY%20SYSTEM.jpeg)
+
+### QR Based Entry System
+![QR Based Entry System](screenshots/QR%20BASED%20ENTRY%20SYSTEM.jpeg)
+
+### Matplotlib Dashboard
+![Matplotlib Dashboard](screenshots/MATPLOTLIB%20DASHBOARD.jpeg)
+
+### Tableau Dashboard
+![Tableau Dashboard](screenshots/tableau%20dashboard.jpeg)
+
+### Filtered Tableau Dashboard
+![Filtered Tableau Dashboard](screenshots/filtered%20tableau%20dashboard.jpeg)
