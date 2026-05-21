@@ -1,0 +1,10 @@
+open the tableau dashboard through python code ui
+1) copy paste the python code
+2) In the ui give Tableau option to open Tableau Dashboard
+3) Then give password as Zayan@786
+4) If you have done any changes in ui once after opening the tableau dashboard you can you have refresh the data in tableau
+
+
+
+
+password is Zayan@786

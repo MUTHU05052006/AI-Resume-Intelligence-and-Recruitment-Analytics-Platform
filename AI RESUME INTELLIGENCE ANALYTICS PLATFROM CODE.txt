@@ -1,0 +1,2887 @@
+from flask import Flask, request, jsonify
+import threading
+import mysql.connector
+from mysql.connector import Error
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox, simpledialog
+import csv
+import os
+import re
+import pickle
+import subprocess
+import sys
+from datetime import datetime
+from collections import Counter, defaultdict
+import math
+import socket
+
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import Pipeline
+    from sklearn.model_selection import train_test_split
+    SKLEARN_AVAILABLE = True
+except Exception:
+    TfidfVectorizer = None
+    LogisticRegression = None
+    Pipeline = None
+    train_test_split = None
+    SKLEARN_AVAILABLE = False
+
+try:
+    import joblib
+except Exception:
+    joblib = None
+
+try:
+    import pdfplumber
+except Exception:
+    pdfplumber = None
+    
+
+try:
+    from docx import Document
+except Exception:
+    Document = None
+
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    REPORTLAB_AVAILABLE = True
+except Exception:
+    canvas = None
+    A4 = None
+    REPORTLAB_AVAILABLE = False
+
+
+class AIRResumeScreeningApp:
+    BASE_LABELS = [
+        "ID", "Name", "Role", "Department", "Experience", "Education",
+        "Skills", "Salary", "Selected", "Score", "Status"
+    ]
+    EXTRA_LABELS = ["ResumeScore", "MLScore", "SourceFile"]
+    LABELS = BASE_LABELS + EXTRA_LABELS
+
+    ROLE_OPTIONS = [
+        "Data Analyst", "Python Developer", "HR", "Marketing", "Finance", "General"
+    ]
+    EDUCATION_OPTIONS = ["BSc", "BTech", "BE", "MSc", "MTech", "MBA", "PhD", "BCA", "MCA"]
+    SELECTED_OPTIONS = ["Yes", "No"]
+
+    ROLE_SKILLS = {
+        "Data Analyst": {
+            "python", "sql", "excel", "tableau", "power bi", "statistics",
+            "pandas", "numpy", "data visualization", "analytics"
+        },
+        "Python Developer": {
+            "python", "django", "flask", "api", "sql", "git",
+            "fastapi", "oop", "debugging", "rest"
+        },
+        "HR": {
+            "communication", "recruitment", "excel", "interviewing",
+            "onboarding", "screening", "hr operations"
+        },
+        "Marketing": {
+            "seo", "content", "social media", "analytics", "branding",
+            "campaigns", "copywriting"
+        },
+        "Finance": {
+            "excel", "accounting", "tax", "audit", "tally",
+            "financial analysis", "bookkeeping"
+        },
+        "General": {
+            "communication", "excel", "teamwork", "problem solving"
+        }
+    }
+
+    EDUCATION_SCORES = {
+        "phd": 20,
+        "msc": 15, "mtech": 15, "mba": 15, "mca": 15,
+        "bsc": 10, "btech": 10, "be": 10, "bca": 10
+    }
+
+    GLOBAL_SKILLS = sorted({
+        "python", "sql", "excel", "tableau", "power bi", "statistics", "pandas",
+        "numpy", "django", "flask", "api", "git", "communication", "recruitment",
+        "interviewing", "onboarding", "seo", "content", "social media", "analytics",
+        "branding", "accounting", "tax", "audit", "tally", "fastapi", "machine learning",
+        "deep learning", "nlp", "data science", "data analysis", "leadership",
+        "problem solving", "teamwork", "java", "c++", "html", "css", "javascript",
+        "react", "node", "mongodb", "mysql", "postgresql", "aws", "azure", "docker",
+        "kubernetes", "linux", "oop", "rest", "financial analysis", "bookkeeping"
+    })
+
+    def __init__(self, root):
+        self.root = root
+        self.COLORS = {
+            "bg": "#eef2f7",
+            "surface": "#ffffff",
+            "surface_alt": "#f8fafc",
+            "primary": "#2563eb",
+            "primary_dark": "#1e40af",
+            "success": "#16a34a",
+            "warning": "#f59e0b",
+            "danger": "#ef4444",
+            "text": "#0f172a",
+            "muted": "#64748b",
+            "border": "#cbd5e1",
+            "card_blue": "#dbeafe",
+            "card_green": "#dcfce7",
+            "card_yellow": "#fef3c7",
+            "card_red": "#fee2e2",
+}
+        self.root.title("Resume Screening Dashboard")
+        self.root.geometry("1680x980")
+        self.root.minsize(1360, 780)
+
+        self.base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.data_folder = os.path.join(self.base_dir, "dashboard_data")
+        self.data_file = os.path.join(self.data_folder, "resume_data_ai.csv")
+        self.model_file = os.path.join(self.data_folder, "candidate_model.pkl")
+        self.db_name = "resume_db"
+        self.table_name = "resume_table"
+        self.db_config = {
+            "host": "localhost",
+            "user": "root",
+            "password": "Zayan@786"
+        }
+        ip = self.get_local_ip()
+        self.flask_server_address = ""
+        self.update_flask_address_automatically()
+        self.mysql_available = False
+
+        # Tableau workbook should now be .twb for live CSV linking
+        self.tableau_file = os.path.join(self.base_dir, "resume_dashboard.twb")
+        self.filtered_tableau_file = os.path.join(self.base_dir, "resume_dashboard_filtered.twb")
+        self.filtered_table_name = "data_updated"
+        self.filtered_rows = []
+        self.filtered_ids = []
+
+        # Tableau and app both use this same CSV
+        self.tableau_data_source = "MySQL: resume_db.resume_table"
+        self.filtered_table_name = "data_updated"
+        self.filtered_ids = []
+        self.filtered_rows = []
+        self.current_resume_path = ""
+        self.current_resume_text = ""
+        self.ml_pipeline = None
+
+        self.setup_storage()
+        self.setup_mysql()
+        self.setup_style()
+        self.build_ui()
+        if not self.ask_dashboard_settings():
+            return
+        
+        threading.Thread(target=self.start_qr_server, daemon=True).start()
+        self.load_model_if_exists()
+        self.load_data()
+        self.clear_form()
+        self.set_status("Resume Screening Dashboard is ready.")
+
+    # ---------------- QR GENERATOR ----------------
+    def start_qr_server(self):
+        app = Flask("qr_server")
+
+        @app.route("/")
+        def qr_home():
+            return """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>QR Scanner</title>
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+            </head>
+            <body style="font-family: Arial; padding: 20px;">
+                <h2>QR Scanner Bridge</h2>
+                <p>Open /scanner on this server from your phone.</p>
+            </body>
+            </html>
+            """
+
+        @app.route("/scan", methods=["POST"])
+        def receive_qr():
+            data = request.json or {}
+            print("Received from phone:", data)
+ 
+            self.root.after(0, lambda: self.handle_qr_data(data))
+            return jsonify({"status": "success"})
+
+        @app.route("/scanner")
+        def scanner_page():
+            return """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Mobile QR Scanner</title>
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+            </head>
+            <body style="font-family: Arial; padding: 16px;">
+                <h2>Scan QR Code</h2>
+                <div id="reader" style="width: 100%; max-width: 420px;"></div>
+                <p id="status">Waiting for scan...</p>
+
+                <script>
+                    function onScanSuccess(decodedText, decodedResult) {
+                        document.getElementById("status").innerText = "QR detected. Sending data...";
+
+                        let payload;
+                        try {
+                            payload = JSON.parse(decodedText);
+                        } catch (e) {
+                            document.getElementById("status").innerText = "Invalid QR JSON format";
+                            return;
+                        }
+
+                        fetch("/scan", {
+                            method: "POST",
+                            headers: {
+                                "Content-Type": "application/json"
+                            },
+                            body: JSON.stringify(payload)
+                        })
+                        .then(response => response.json())
+                        .then(data => {
+                            document.getElementById("status").innerText = "Sent successfully!";
+                        })
+                        .catch(error => {
+                            document.getElementById("status").innerText = "Failed to send data";
+                            console.error(error);
+                        });
+                    }
+
+                    let html5QrcodeScanner = new Html5QrcodeScanner(
+                        "reader",
+                        { fps: 10, qrbox: 250 },
+                        false
+                    );
+                    html5QrcodeScanner.render(onScanSuccess);
+                </script>
+            </body>
+            </html>
+            """
+
+        app.run(
+            host="0.0.0.0",
+            port=5000,
+            debug=False,
+            use_reloader=False,
+            ssl_context="adhoc"
+            )
+
+     
+    def handle_qr_data(self, data):
+        try:
+            name = data.get("name", "").strip()
+            role = data.get("role", "").strip()
+            department = data.get("department", "").strip()
+            experience = str(data.get("experience", "0")).strip()
+            skills = data.get("skills", "").strip()
+
+            # Best option: unique id inside QR
+            qr_id = str(data.get("qr_id", "")).strip()
+
+            # Fallback unique key if qr_id is not present
+            unique_key = qr_id if qr_id else f"{name}|{role}|{department}|{experience}|{skills}".lower()
+
+            rows = self.read_rows()
+
+            # duplicate check
+            for row in rows:
+                existing_key = (
+                    row.get("SourceFile", "").strip().lower()
+                    if row.get("SourceFile", "").strip().startswith("QR::")
+                    else f"{row.get('Name','').strip()}|{row.get('Role','').strip()}|"
+                         f"{row.get('Department','').strip()}|{row.get('Experience','').strip()}|"
+                         f"{row.get('Skills','').strip()}".lower()
+                )
+
+                if existing_key == f"qr::{unique_key}" or existing_key == unique_key:
+                    self.set_status("Duplicate QR entry ignored.")
+                    return
+
+            # fill form
+            self.form_widgets["Name"].delete(0, tk.END)
+            self.form_widgets["Name"].insert(0, name)
+
+            self.form_widgets["Role"].set(role)
+
+            self.form_widgets["Department"].delete(0, tk.END)
+            self.form_widgets["Department"].insert(0, department)
+
+            self.form_widgets["Experience"].delete(0, tk.END)
+            self.form_widgets["Experience"].insert(0, experience)
+
+            self.form_widgets["Skills"].delete(0, tk.END)
+            self.form_widgets["Skills"].insert(0, skills)
+
+            # optional defaults
+            self.form_widgets["Education"].delete(0, tk.END)
+            self.form_widgets["Salary"].delete(0, tk.END)
+            self.form_widgets["Selected"].set("No")
+
+            self.current_resume_path = f"QR::{unique_key}"
+            self.update_score_fields()
+
+            # auto-save to file + MySQL
+            record = self.build_record_from_form()
+            record["SourceFile"] = f"QR::{unique_key}"
+
+            rows.append(record)
+            self.write_rows(rows)
+            self.replace_mysql_from_rows(rows)
+            self.load_data()
+            self.refresh_ui_summary()
+            self.clear_form()
+
+            self.set_status("QR data saved automatically.")
+
+        except Exception as e:
+            print("QR Error:", e)
+            messagebox.showerror("QR Error", str(e))
+
+
+    def qr_entry_exists(self, unique_key):
+        rows = self.read_rows()
+        target = f"qr::{unique_key}".lower()
+
+        for row in rows:
+            source = row.get("SourceFile", "").strip().lower()
+            fallback = (
+                f"{row.get('Name','').strip()}|{row.get('Role','').strip()}|"
+                f"{row.get('Department','').strip()}|{row.get('Experience','').strip()}|"
+                f"{row.get('Skills','').strip()}".lower()
+            )
+
+            if source == target or fallback == unique_key.lower():
+                return True
+        return False
+
+    # ---------------- STORAGE ----------------
+    def get_mysql_connection(self, use_database=True):
+        config = dict(self.db_config)
+        if use_database:
+            config["database"] = self.db_name
+        return mysql.connector.connect(**config)
+
+    def setup_mysql(self):
+        try:
+            conn = self.get_mysql_connection(use_database=False)
+            cursor = conn.cursor()
+
+            cursor.execute(f"CREATE DATABASE IF NOT EXISTS {self.db_name}")
+            cursor.close()
+            conn.close()
+
+            conn = self.get_mysql_connection(use_database=True)
+            cursor = conn.cursor()
+
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self.table_name} (
+                    ID VARCHAR(50) PRIMARY KEY,
+                    Name VARCHAR(255),
+                    Role VARCHAR(255),
+                    Department VARCHAR(255),
+                    Experience VARCHAR(50),
+                    Education TEXT,
+                    Skills TEXT,
+                    Salary VARCHAR(50),
+                    Selected VARCHAR(10),
+                    Score VARCHAR(50),
+                    Status VARCHAR(100),
+                    ResumeScore VARCHAR(50),
+                    MLScore VARCHAR(50),
+                    SourceFile VARCHAR(255)
+                )
+            """)
+
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self.filtered_table_name} (
+                    ID VARCHAR(50) PRIMARY KEY,
+                    Name VARCHAR(255),
+                    Role VARCHAR(255),
+                    Department VARCHAR(255),
+                    Experience VARCHAR(50),
+                    Education TEXT,
+                    Skills TEXT,
+                    Salary VARCHAR(50),
+                    Selected VARCHAR(10),
+                    Score VARCHAR(50),
+                    Status VARCHAR(100),
+                    ResumeScore VARCHAR(50),
+                    MLScore VARCHAR(50),
+                    SourceFile VARCHAR(255)
+                )
+            """)
+
+            conn.commit()
+            cursor.close()
+            conn.close()
+            self.mysql_available = True
+
+        except Error as e:
+            self.mysql_available = False
+            print("MySQL setup error:", e)
+
+    def insert_mysql_record(self, record):
+        if not self.mysql_available:
+            return
+
+        try:
+            conn = self.get_mysql_connection()
+            cursor = conn.cursor()
+
+            query = f"""
+                INSERT INTO {self.table_name}
+                (ID, Name, Role, Department, Experience, Education, Skills,
+                 Salary, Selected, Score, Status, ResumeScore, MLScore, SourceFile)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+
+            values = (
+                record["ID"], record["Name"], record["Role"], record["Department"],
+                record["Experience"], record["Education"], record["Skills"],
+                record["Salary"], record["Selected"], record["Score"], record["Status"],
+                record["ResumeScore"], record["MLScore"], record["SourceFile"]
+            )
+
+            cursor.execute(query, values)
+            conn.commit()
+            cursor.close()
+            conn.close()
+
+        except Error as e:
+            print("MySQL insert error:", e)
+
+    def update_mysql_record(self, record):
+        if not self.mysql_available:
+            return
+
+        try:
+            conn = self.get_mysql_connection()
+            cursor = conn.cursor()
+
+            query = f"""
+                UPDATE {self.table_name}
+                SET Name=%s, Role=%s, Department=%s, Experience=%s, Education=%s,
+                    Skills=%s, Salary=%s, Selected=%s, Score=%s, Status=%s,
+                    ResumeScore=%s, MLScore=%s, SourceFile=%s
+                WHERE ID=%s
+            """
+
+            values = (
+                record["Name"], record["Role"], record["Department"], record["Experience"],
+                record["Education"], record["Skills"], record["Salary"], record["Selected"],
+                record["Score"], record["Status"], record["ResumeScore"], record["MLScore"],
+                record["SourceFile"], record["ID"]
+            )
+
+            cursor.execute(query, values)
+            conn.commit()
+            cursor.close()
+            conn.close()
+
+        except Error as e:
+            print("MySQL update error:", e)
+
+    def delete_mysql_record(self, candidate_id):
+        if not self.mysql_available:
+            return
+
+        try:
+            conn = self.get_mysql_connection()
+            cursor = conn.cursor()
+
+            cursor.execute(f"DELETE FROM {self.table_name} WHERE ID = %s", (candidate_id,))
+            conn.commit()
+            cursor.close()
+            conn.close()
+
+        except Error as e:
+            print("MySQL delete error:", e)
+
+    def get_local_ip(self):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return "127.0.0.1"
+
+    def update_flask_address_automatically(self):
+        ip = self.get_local_ip()
+        self.flask_server_address = f"https://{ip}:5000"
+
+    def replace_mysql_from_rows(self, rows):
+        if not self.mysql_available:
+            return
+
+        try:
+            conn = self.get_mysql_connection()
+            cursor = conn.cursor()
+
+            cursor.execute(f"TRUNCATE TABLE {self.table_name}")
+
+            query = f"""
+                INSERT INTO {self.table_name}
+                (ID, Name, Role, Department, Experience, Education, Skills,
+                 Salary, Selected, Score, Status, ResumeScore, MLScore, SourceFile)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+
+            values = []
+            for record in rows:
+                values.append((
+                    record["ID"], record["Name"], record["Role"], record["Department"],
+                    record["Experience"], record["Education"], record["Skills"],
+                    record["Salary"], record["Selected"], record["Score"], record["Status"],
+                    record["ResumeScore"], record["MLScore"], record["SourceFile"]
+                ))
+
+            if values:
+                cursor.executemany(query, values)
+
+            conn.commit()
+            cursor.close()
+            conn.close()
+
+        except Error as e:
+            print("MySQL replace error:", e)
+
+    def replace_data_updated_from_rows(self, rows):
+        if not self.mysql_available:
+            return
+
+        try:
+            conn = self.get_mysql_connection()
+            cursor = conn.cursor()
+
+            cursor.execute(f"TRUNCATE TABLE {self.filtered_table_name}")
+
+            query = f"""
+                INSERT INTO {self.filtered_table_name}
+                (ID, Name, Role, Department, Experience, Education, Skills,
+                Salary, Selected, Score, Status, ResumeScore, MLScore, SourceFile)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+
+            values = []
+            for record in rows:
+                record = self.ensure_row_schema(record)
+                values.append((
+                    record["ID"], record["Name"], record["Role"], record["Department"],
+                    record["Experience"], record["Education"], record["Skills"],
+                    record["Salary"], record["Selected"], record["Score"], record["Status"],
+                    record["ResumeScore"], record["MLScore"], record["SourceFile"]
+                ))
+
+            if values:
+                cursor.executemany(query, values)
+
+            conn.commit()
+            cursor.close()
+            conn.close()
+
+        except Error as e:
+            print("data_updated replace error:", e)
+
+    def sync_csv_to_mysql(self):
+        rows = self.read_rows()
+        if not rows:
+            self.set_status("No CSV data found to sync.")
+            return
+
+        self.replace_mysql_from_rows(rows)
+        self.set_status(f"{len(rows)} records synced to MySQL.")
+
+    def setup_storage(self):
+        os.makedirs(self.data_folder, exist_ok=True)
+        if not os.path.exists(self.data_file):
+            with open(self.data_file, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(self.LABELS)
+
+    import socket
+
+    def get_local_ip(self):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except:
+            return "127.0.0.1"
+
+    def download_pdf_report(self):
+        if not REPORTLAB_AVAILABLE:
+            messagebox.showerror(
+                "Missing Dependency",
+                "reportlab is not installed.\nRun: pip install reportlab"
+            )
+            return
+
+        rows = self.filtered_rows if self.filtered_rows else self.read_rows()
+        if not rows:
+            messagebox.showerror("Error", "No candidate data available for PDF report.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            title="Save PDF Report",
+            defaultextension=".pdf",
+            filetypes=[("PDF files", "*.pdf")]
+        )
+        if not file_path:
+            return
+
+        try:
+            total_candidates = len(rows)
+            shortlisted = sum(1 for r in rows if r["Status"] == "Shortlisted")
+            review = sum(1 for r in rows if r["Status"] == "Review")
+            rejected = sum(1 for r in rows if r["Status"] == "Rejected")
+            avg_score = round(sum(float(r["Score"] or 0) for r in rows) / total_candidates, 2) if total_candidates else 0
+            avg_ml = round(sum(float(r["MLScore"] or 0) for r in rows) / total_candidates, 2) if total_candidates else 0
+            avg_resume = round(sum(float(r["ResumeScore"] or 0) for r in rows) / total_candidates, 2) if total_candidates else 0
+
+            top = sorted(rows, key=lambda x: float(x["Score"] or 0), reverse=True)[:5]
+
+            pdf = canvas.Canvas(file_path, pagesize=A4)
+            width, height = A4
+
+            y = height - 50
+            pdf.setFont("Helvetica-Bold", 16)
+            pdf.drawString(40, y, "AI Recruitment Report")
+
+            y -= 25
+            pdf.setFont("Helvetica", 10)
+            pdf.drawString(40, y, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+            y -= 35
+            pdf.setFont("Helvetica-Bold", 12)
+            pdf.drawString(40, y, "Summary")
+
+            y -= 20
+            pdf.setFont("Helvetica", 10)
+            summary_lines = [
+                f"Total Candidates: {total_candidates}",
+                f"Shortlisted: {shortlisted}",
+                f"Review: {review}",
+                f"Rejected: {rejected}",
+                f"Average Final Score: {avg_score}",
+                f"Average Resume Score: {avg_resume}",
+                f"Average ML Score: {avg_ml}",
+            ]
+
+            for line in summary_lines:
+                pdf.drawString(50, y, line)
+                y -= 16
+
+            y -= 10
+            pdf.setFont("Helvetica-Bold", 12)
+            pdf.drawString(40, y, "Top 5 Candidates")
+
+            y -= 20
+            pdf.setFont("Helvetica", 10)
+
+            for idx, row in enumerate(top, start=1):
+                candidate_lines = [
+                    f"{idx}. {row['Name']}",
+                    f"   Role: {row['Role']} | Department: {row['Department']}",
+                    f"   Experience: {row['Experience']} | Education: {row['Education']}",
+                    f"   Final Score: {row['Score']} | ResumeScore: {row['ResumeScore']} | MLScore: {row['MLScore']}",
+                    f"   Status: {row['Status']}",
+                ]
+
+                for line in candidate_lines:
+                    if y < 60:
+                        pdf.showPage()
+                        y = height - 50
+                        pdf.setFont("Helvetica", 10)
+                    pdf.drawString(50, y, line[:110])
+                    y -= 16
+
+                y -= 8
+
+            pdf.save()
+            self.set_status(f"PDF report saved: {os.path.basename(file_path)}")
+            messagebox.showinfo("Success", f"PDF report downloaded successfully.\n\nSaved to:\n{file_path}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to generate PDF report.\n\n{e}")
+
+    def export_to_csv(self):
+        rows = self.filtered_rows if self.filtered_rows else self.read_rows()
+
+        if not rows:
+            messagebox.showerror("Error", "No data available to export.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            title="Save CSV File",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")]
+        )
+
+        if not file_path:
+            return
+
+        try:
+            headers = list(rows[0].keys())
+
+            with open(file_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=headers)
+                writer.writeheader()
+                writer.writerows(rows)
+
+            messagebox.showinfo(
+                "Success",
+                f"CSV file created successfully!\n\nSaved to:\n{file_path}"
+            )
+
+            self.set_status(f"CSV exported: {len(rows)} records")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export CSV.\n\n{e}")
+
+    def download_top_candidates_pdf(self):
+        if not REPORTLAB_AVAILABLE:
+            messagebox.showerror(
+                "Missing Dependency",
+                "reportlab is not installed.\nRun: pip install reportlab"
+            )
+            return
+
+        rows = self.filtered_rows if self.filtered_rows else self.read_rows()
+        if not rows:
+            messagebox.showerror("Error", "No candidate data available.")
+            return
+
+        top_n = simpledialog.askinteger(
+            "Top Candidates PDF",
+            f"Enter how many top candidates to include (1 to {len(rows)}):",
+            parent=self.root,
+            minvalue=1,
+            maxvalue=len(rows)
+        )
+
+        if top_n is None:
+            return
+
+        sorted_rows = sorted(
+            rows,
+            key=lambda x: float(x.get("Score", 0) or 0),
+            reverse=True
+        )[:top_n]
+
+        file_path = filedialog.asksaveasfilename(
+            title="Save Top Candidates PDF",
+            defaultextension=".pdf",
+            filetypes=[("PDF files", "*.pdf")]
+        )
+        if not file_path:
+            return
+
+        try:
+            pdf = canvas.Canvas(file_path, pagesize=A4)
+            width, height = A4
+            y = height - 50
+
+            pdf.setFont("Helvetica-Bold", 16)
+            pdf.drawString(40, y, f"Top {top_n} Candidates Report")
+
+            y -= 25
+            pdf.setFont("Helvetica", 10)
+            pdf.drawString(40, y, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+            y -= 30
+            pdf.setFont("Helvetica-Bold", 12)
+            pdf.drawString(40, y, "Candidate Details")
+
+            y -= 20
+            pdf.setFont("Helvetica", 10)
+
+            for idx, row in enumerate(sorted_rows, start=1):
+                lines = [
+                    f"{idx}. {row.get('Name', '')}",
+                    f"   ID: {row.get('ID', '')}",
+                    f"   Role: {row.get('Role', '')}",
+                    f"   Department: {row.get('Department', '')}",
+                    f"   Experience: {row.get('Experience', '')}",
+                    f"   Education: {row.get('Education', '')}",
+                    f"   Skills: {row.get('Skills', '')}",
+                    f"   Salary: {row.get('Salary', '')}",
+                    f"   Selected: {row.get('Selected', '')}",
+                    f"   Resume Score: {row.get('ResumeScore', '')}",
+                    f"   ML Score: {row.get('MLScore', '')}",
+                    f"   Final Score: {row.get('Score', '')}",
+                    f"   Status: {row.get('Status', '')}",
+                    f"   Source File: {row.get('SourceFile', '')}",
+                ]
+
+                for line in lines:
+                    if y < 60:
+                        pdf.showPage()
+                        y = height - 50
+                        pdf.setFont("Helvetica", 10)
+                    pdf.drawString(50, y, line[:115])
+                    y -= 16
+
+                y -= 10
+
+            pdf.save()
+            self.set_status(f"Top {top_n} candidates PDF saved successfully.")
+            messagebox.showinfo(
+                "Success",
+                f"Top {top_n} candidates PDF downloaded successfully.\n\nSaved to:\n{file_path}"
+            )
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to generate top candidates PDF.\n\n{e}")
+        
+    def ensure_row_schema(self, row):
+        fixed = {}
+        for col in self.LABELS:
+            val = row.get(col, "")
+            fixed[col] = val.strip() if isinstance(val, str) else str(val)
+        return fixed
+
+    def read_rows(self):
+        if not os.path.exists(self.data_file):
+            return []
+        with open(self.data_file, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        return [self.ensure_row_schema(row) for row in rows]
+
+    def write_rows(self, rows):
+        with open(self.data_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=self.LABELS)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(self.ensure_row_schema(row))
+
+    def generate_id(self):
+        return "C" + datetime.now().strftime("%Y%m%d%H%M%S%f")[-12:]
+
+    # ---------------- STYLE ----------------
+    def setup_style(self):
+        style = ttk.Style()
+        style.theme_use("clam")
+
+        self.root.configure(bg=self.COLORS["bg"])
+
+        style.configure(
+            "Title.TLabel",
+            font=("Segoe UI", 20, "bold"),
+            foreground=self.COLORS["text"],
+            background=self.COLORS["bg"]
+        )
+
+        style.configure(
+            "Subtitle.TLabel",
+            font=("Segoe UI", 10),
+            foreground=self.COLORS["muted"],
+            background=self.COLORS["bg"]
+        )
+
+        style.configure(
+            "Section.TLabelframe",
+            background=self.COLORS["surface"],
+            borderwidth=1,
+            relief="solid"
+        )
+
+        style.configure(
+            "Section.TLabelframe.Label",
+            font=("Segoe UI", 11, "bold"),
+            foreground=self.COLORS["text"],
+            background=self.COLORS["surface"]
+        )
+
+        style.configure(
+            "Primary.TButton",
+            padding=8,
+            font=("Segoe UI", 10, "bold"),
+            background=self.COLORS["primary"],
+            foreground="white",
+            borderwidth=0
+        )
+        style.map(
+            "Primary.TButton",
+            background=[("active", self.COLORS["primary_dark"])]
+        )
+
+        style.configure(
+            "Secondary.TButton",
+            padding=8,
+            font=("Segoe UI", 10),
+            background=self.COLORS["surface_alt"],
+            foreground=self.COLORS["text"],
+            bordercolor=self.COLORS["border"],
+            borderwidth=1
+        )
+        style.map(
+            "Secondary.TButton",
+            background=[("active", "#e2e8f0")]
+        )
+
+        style.configure(
+            "Danger.TButton",
+            padding=8,
+            font=("Segoe UI", 10, "bold"),
+            background=self.COLORS["danger"],
+            foreground="white",
+            borderwidth=0
+       )
+        style.map(
+            "Danger.TButton",
+            background=[("active", "#dc2626")]
+       )
+
+        style.configure(
+            "Treeview",
+            rowheight=30,
+            font=("Segoe UI", 10),
+            background="#ffffff",
+            fieldbackground="#ffffff",
+            foreground=self.COLORS["text"],
+            bordercolor=self.COLORS["border"],
+            borderwidth=1
+      )
+
+        style.configure(
+            "Treeview.Heading",
+            font=("Segoe UI", 10, "bold"),
+            background="#e2e8f0",
+            foreground=self.COLORS["text"]
+      )
+
+        style.configure(
+            "Readonly.TEntry",
+            fieldbackground="#eef2f7"
+      )
+
+        style.map(
+            "Treeview",
+            background=[("selected", "#bfdbfe")],
+            foreground=[("selected", "#0f172a")]
+      )
+
+    def build_header(self, parent):
+        header = tk.Frame(parent, bg=self.COLORS["surface"], padx=16, pady=12, bd=1, relief="solid")
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(0, weight=0)
+        header.grid_columnconfigure(1, weight=1)
+        header.grid_columnconfigure(2, weight=0)
+        header.grid_columnconfigure(3, weight=0)
+
+
+        title_frame = tk.Frame(header, bg=self.COLORS["surface"])
+        title_frame.grid(row=0, column=0, sticky="w")
+
+        ttk.Label(
+            title_frame,
+            text="Resume Screening Dashboard",
+            style="Title.TLabel"
+        ).grid(row=0, column=0, sticky="w")
+
+        ttk.Label(
+            title_frame,
+            text="AI-powered hiring, screening and recruitment insights",
+            style="Subtitle.TLabel"
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        center_actions = tk.Frame(header, bg=self.COLORS["surface"])
+        center_actions.grid(row=0, column=1, sticky="ew", padx=(30, 30))
+
+        ttk.Button(
+            center_actions,
+            text="Export CSV",
+            command=self.export_to_csv,
+            style="Secondary.TButton",
+            width=12
+        ).pack(side="left", padx=6, pady=4)
+
+        ttk.Button(
+            center_actions,
+            text="Import",
+            command=self.import_csv,
+            style="Secondary.TButton",
+            width=10
+        ).pack(side="left", padx=6, pady=4)
+
+        search_frame = tk.Frame(header, bg=self.COLORS["surface"])
+        search_frame.grid(row=0, column=1, sticky="e")
+
+        ttk.Label(search_frame, text="Quick Search").grid(row=0, column=0, padx=(0, 6))
+
+        self.global_search = ttk.Entry(search_frame, width=30)
+        self.global_search.grid(row=0, column=1, padx=(0, 6))
+        self.global_search.bind("<Return>", self.quick_search_data)
+
+        ttk.Button(
+            search_frame,
+            text="Search",
+            command=self.quick_search_data,
+            style="Secondary.TButton"
+        ).grid(row=0, column=2)
+
+        # --- ML Model Status (ADD THIS BLOCK) ---
+        self.model_info_var = tk.StringVar(value="ML Model: Not trained")
+
+        ttk.Label(
+            header,
+            textvariable=self.model_info_var,
+            foreground="green",
+            font=("Segoe UI", 10, "bold")
+        ).grid(row=0, column=3, padx=10, sticky="e")
+
+    def get_summary_metrics(self):
+        rows = self.read_rows()
+        total = len(rows)
+        shortlisted = sum(1 for r in rows if r["Status"] == "Shortlisted")
+        review = sum(1 for r in rows if r["Status"] == "Review")
+        rejected = sum(1 for r in rows if r["Status"] == "Rejected")
+        avg_score = round(
+            sum(float(r["Score"] or 0) for r in rows) / total, 2
+        ) if total else 0
+
+        return {
+            "Total Candidates": total,
+            "Shortlisted": shortlisted,
+            "Review": review,
+            "Rejected": rejected,
+            "Avg Score": avg_score
+        }
+
+    def create_stat_card(self, parent, title, value):
+        bg_map = {
+            "Total Candidates": self.COLORS["card_blue"],
+            "Shortlisted": self.COLORS["card_green"],
+            "Review": self.COLORS["card_yellow"],
+            "Rejected": self.COLORS["card_red"],
+            "Avg Score": self.COLORS["surface"],
+        }
+
+        card_bg = bg_map.get(title, self.COLORS["surface"])
+
+        card = tk.Frame(
+            parent,
+            bg=card_bg,
+            bd=1,
+            relief="solid",
+            padx=12,
+            pady=10
+        )
+        card.pack(side="left", fill="both", expand=True, padx=6)
+
+        tk.Label(
+            card,
+            text=title,
+            bg=card_bg,
+            fg=self.COLORS["muted"],
+            font=("Segoe UI", 10)
+        ).pack(anchor="w")
+
+        tk.Label(
+            card,
+            text=str(value),
+            bg=card_bg,
+            fg=self.COLORS["text"],
+            font=("Segoe UI", 18, "bold")
+        ).pack(anchor="w", pady=(6, 0))
+
+    def build_summary_cards(self, parent):
+        self.summary_container = tk.Frame(
+            parent,
+            bg=self.COLORS["bg"],
+            padx=10,
+            pady=6
+        )
+        self.summary_container.grid(row=1, column=0, sticky="ew")
+
+        metrics = self.get_summary_metrics()
+        for title, value in metrics.items():
+            self.create_stat_card(self.summary_container, title, value)
+
+    def refresh_ui_summary(self):
+        if not hasattr(self, "summary_container"):
+            return
+
+        for widget in self.summary_container.winfo_children():
+            widget.destroy()
+
+        metrics = self.get_summary_metrics()
+        for title, value in metrics.items():
+            self.create_stat_card(self.summary_container, title, value)
+
+    def build_main_content(self, parent):
+        content = tk.Frame(
+            parent,
+            bg=self.COLORS["bg"],
+            padx=10,
+            pady=10
+        )
+        content.grid(row=2, column=0, sticky="nsew")
+        content.grid_rowconfigure(0, weight=1)
+        content.grid_columnconfigure(1, weight=1)
+
+        self.left_panel = ttk.LabelFrame(
+            content,
+            text="Candidate Details",
+            padding=12,
+            style="Section.TLabelframe"
+        )
+        self.left_panel.grid(row=0, column=0, sticky="ns", padx=(0, 10))
+
+        self.build_form()
+
+        right_panel = tk.Frame(content, bg=self.COLORS["bg"])
+        right_panel.grid(row=0, column=1, sticky="nsew")
+        right_panel.grid_rowconfigure(1, weight=1)
+        right_panel.grid_columnconfigure(0, weight=1)
+
+        self.build_toolbar(right_panel)
+        self.build_table(right_panel)
+
+    def build_toolbar(self, parent):
+        toolbar = tk.Frame(parent, bg=self.COLORS["bg"])
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        toolbar.grid_columnconfigure(0, weight=1)
+        toolbar.grid_columnconfigure(1, weight=0)
+
+        left_actions = tk.Frame(toolbar, bg=self.COLORS["bg"])
+        left_actions.grid(row=0, column=0, sticky="w")
+
+        right_actions = tk.Frame(toolbar, bg=self.COLORS["bg"])
+        right_actions.grid(row=0, column=1, sticky="e")
+
+        ttk.Button(
+            left_actions,
+            text="New",
+            command=self.clear_form,
+            style="Secondary.TButton",   
+            width=7
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+            left_actions,
+            text="Save",
+            command=self.add_candidate,
+            style="Primary.TButton",
+            width=7
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+            left_actions,
+            text="Update",
+            command=self.update_candidate,
+            style="Secondary.TButton",
+            width=8
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+            left_actions,
+            text="Delete",
+            command=self.delete_candidate,
+            style="Danger.TButton",
+            width=8
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+            left_actions,
+            text="Upload",
+            command=self.upload_resume,
+            style="Secondary.TButton",
+            width=8
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+            left_actions,
+            text="Parse",
+            command=self.auto_parse_resume,
+            style="Secondary.TButton",
+            width=8
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+            right_actions,
+            text="Train",
+            command=self.train_model_from_dataset,
+            style="Secondary.TButton",
+            width=9
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+            right_actions,
+            text="Dashboard",
+            command=self.open_dashboard,
+            style="Secondary.TButton",
+            width=10
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+            right_actions,
+            text="Top Candidates",
+            command=self.download_top_candidates_pdf,
+            style="Secondary.TButton",
+            width=14
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+            right_actions,
+            text="Tableau",
+            command=self.open_tableau_dashboard,
+            style="Secondary.TButton",
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+        right_actions,
+        text="Filtered Tableau",
+        command=self.open_filtered_tableau_dashboard,
+        style="Secondary.TButton",
+        width=17
+        ).pack(side="left", padx=4)
+
+    def build_table(self, parent):
+        table_frame = ttk.LabelFrame(
+            parent,
+            text="Candidates",
+            padding=6,
+            style="Section.TLabelframe"
+        )
+        table_frame.grid(row=1, column=0, sticky="nsew")
+        table_frame.grid_rowconfigure(1, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
+
+        filter_bar = tk.Frame(table_frame, bg=self.COLORS["surface"])
+        filter_bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Label(filter_bar, text="Search Column").pack(side="left", padx=(4, 6))
+
+        self.search_column = tk.StringVar(value="Name")
+        ttk.OptionMenu(
+            filter_bar,
+            self.search_column,
+            "Name",
+            *self.LABELS[1:]
+        ).pack(side="left", padx=4)
+
+        self.search_entry = ttk.Entry(filter_bar, width=24)
+        self.search_entry.pack(side="left", padx=4)
+        self.search_entry.bind("<Return>", self.search_data)
+
+        ttk.Button(filter_bar, text="Search", command=self.search_data).pack(side="left", padx=4)
+        ttk.Button(filter_bar, text="Show All", command=self.load_data).pack(side="left", padx=4)
+
+        ttk.Label(filter_bar, text="Sort").pack(side="left", padx=(16, 6))
+
+        self.sort_column = tk.StringVar(value="Score")
+        ttk.OptionMenu(
+            filter_bar,
+            self.sort_column,
+            "Score",
+            *self.LABELS[1:]
+        ).pack(side="left", padx=4)
+
+        ttk.Button(filter_bar, text="Asc", command=lambda: self.sort_data(False)).pack(side="left", padx=4)
+        ttk.Button(filter_bar, text="Desc", command=lambda: self.sort_data(True)).pack(side="left", padx=4)
+
+        self.tree = ttk.Treeview(
+            table_frame,
+            columns=self.LABELS,
+            show="headings",
+            height=14
+        )
+        self.tree.grid(row=1, column=0, sticky="nsew")
+        self.tree.bind("<<TreeviewSelect>>", self.load_selected_row)
+        self.tree.bind("<Double-1>", lambda event: self.open_candidate_details())
+
+        for col in self.LABELS:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=120, anchor="center")
+
+        scrollbar_y = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        scrollbar_x = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
+
+        self.tree.configure(
+            yscrollcommand=scrollbar_y.set,
+            xscrollcommand=scrollbar_x.set
+        )
+
+        # Row color tags
+        self.tree.tag_configure("high", background="#dcfce7")
+        self.tree.tag_configure("medium", background="#fef3c7")
+        self.tree.tag_configure("low", background="#fee2e2")
+
+        scrollbar_y.grid(row=1, column=1, sticky="ns")
+        scrollbar_x.grid(row=2, column=0, sticky="ew")
+        
+    # ---------------- UI ----------------
+    def build_ui(self):
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
+
+        outer = tk.Frame(self.root, bg=self.COLORS["bg"])
+        outer.grid(row=0, column=0, sticky="nsew")
+        outer.grid_rowconfigure(2, weight=1)
+        outer.grid_columnconfigure(0, weight=1)
+
+        self.build_header(outer)
+        self.build_summary_cards(outer)
+        self.build_main_content(outer)
+
+        self.status_var = tk.StringVar(value="Ready.")
+        status_bar = ttk.Label(
+            self.root,
+            textvariable=self.status_var,
+            relief="sunken",
+            anchor="w",
+            padding=6
+        )
+        status_bar.grid(row=1, column=0, sticky="ew")
+
+        self.root.bind("<Control-s>", self.add_candidate)
+        self.root.bind("<Delete>", self.delete_candidate)
+        self.root.bind("<Control-f>", lambda event: self.search_entry.focus_set())
+
+    def build_form(self):
+        self.form_widgets = {}
+
+        ttk.Label(
+            self.left_panel,
+            text="Profile Information",
+            font=("Segoe UI", 11, "bold")
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=6, pady=(4, 8))
+
+        fields = [
+            ("Name", "entry"),
+            ("Role", "combo_role"),
+            ("Department", "entry"),
+            ("Experience", "entry"),
+            ("Education", "combo_edu_multi"),
+            ("Skills", "entry"),
+            ("Salary", "entry"),
+            ("Selected", "combo_selected"),
+        ]
+
+        current_row = 1
+
+        for label, widget_type in fields:
+            ttk.Label(self.left_panel, text=label).grid(
+                row=current_row, column=0, padx=8, pady=7, sticky="w"
+        ) 
+
+            if widget_type == "entry":
+                widget = ttk.Entry(self.left_panel, width=42)
+                widget.grid(row=current_row, column=1, padx=6, pady=5, sticky="ew")
+                widget.bind("<KeyRelease>", self.update_score_fields)
+                self.form_widgets[label] = widget
+
+            elif widget_type == "combo_role":
+                widget = ttk.Combobox(
+                    self.left_panel,
+                    values=self.ROLE_OPTIONS,
+                    state="readonly",
+                    width=39
+                )
+                widget.grid(row=current_row, column=1, padx=8, pady=7, sticky="ew")
+                widget.bind("<<ComboboxSelected>>", self.update_score_fields)
+                self.form_widgets[label] = widget
+
+            elif widget_type == "combo_selected":
+                widget = ttk.Combobox(
+                    self.left_panel,
+                    values=self.SELECTED_OPTIONS,
+                    state="readonly",
+                    width=39
+                )
+                widget.grid(row=current_row, column=1, padx=6, pady=5, sticky="ew")
+                widget.bind("<<ComboboxSelected>>", self.update_score_fields)
+                self.form_widgets[label] = widget
+
+            elif widget_type == "combo_edu_multi":
+                frame = ttk.Frame(self.left_panel)
+                frame.grid(row=current_row, column=1, padx=6, pady=5, sticky="ew")
+
+                entry = ttk.Entry(frame, width=30)
+                entry.pack(side="left", fill="x", expand=True)
+                entry.bind("<KeyRelease>", self.update_score_fields)
+
+                combo = ttk.Combobox(
+                    frame,
+                    values=self.EDUCATION_OPTIONS,
+                    state="readonly",
+                    width=10
+                )
+                combo.pack(side="left", padx=(6, 0))
+                combo.bind("<<ComboboxSelected>>", self.add_education)
+
+                self.form_widgets["Education"] = entry
+                self.edu_combo = combo
+
+            current_row += 1
+
+        ttk.Label(
+            self.left_panel,
+            text="AI Evaluation",
+            font=("Segoe UI", 11, "bold")
+        ).grid(row=current_row, column=0, columnspan=2, sticky="w", padx=6, pady=(14, 8))
+
+        current_row += 1
+
+        score_row_1 = ttk.Frame(self.left_panel)
+        score_row_1.grid(row=current_row, column=0, columnspan=2, sticky="ew", padx=6, pady=4)
+
+        box1 = self.create_score_box(score_row_1, "Resume Score", "ResumeScore")
+        box1.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        box2 = self.create_score_box(score_row_1, "ML Score", "MLScore")
+        box2.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        current_row += 1
+
+        score_row_2 = ttk.Frame(self.left_panel)
+        score_row_2.grid(row=current_row, column=0, columnspan=2, sticky="ew", padx=6, pady=4)
+
+        box3 = self.create_score_box(score_row_2, "Final Score", "Score")
+        box3.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        box4 = self.create_score_box(score_row_2, "Status", "Status")
+        box4.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        current_row += 1
+
+        self.source_file_var = tk.StringVar(value="Resume Source: None")
+        ttk.Label(
+            self.left_panel,
+            textvariable=self.source_file_var,
+            foreground="blue",
+            wraplength=500
+        ).grid(row=current_row, column=0, columnspan=2, padx=6, pady=(10, 4), sticky="w")
+
+        self.left_panel.grid_columnconfigure(1, weight=1)
+
+    def create_score_box(self, parent, title, key):
+        color_map = {
+            "Resume Score": self.COLORS["card_blue"],
+            "ML Score": self.COLORS["card_yellow"],
+            "Final Score": self.COLORS["card_green"],
+            "Status": self.COLORS["card_red"],
+        }
+
+        box_bg = color_map.get(title, self.COLORS["surface_alt"])
+
+        box = tk.Frame(
+            parent,
+            bg=box_bg,
+            bd=1,
+            relief="solid",
+            padx=10,
+            pady=8
+        )
+
+        tk.Label(
+            box,
+            text=title,
+            bg=box_bg,
+            fg=self.COLORS["muted"],
+            font=("Segoe UI", 9)
+        ).pack(anchor="w")
+
+        value_label = tk.Label(
+            box,
+            text="0",
+            bg=box_bg,
+            fg=self.COLORS["text"],
+            font=("Segoe UI", 15, "bold")
+        )
+        value_label.pack(anchor="w", pady=(4, 0))
+
+        self.form_widgets[key] = value_label
+        return box 
+   
+    # ---------------- UTILITIES ----------------
+    def set_status(self, message):
+        self.status_var.set(message)
+
+    def update_title(self):
+        self.root.title(
+            f"Resume Screening Dashboard | Records: {len(self.tree.get_children())}"
+        )
+
+    def set_readonly_value(self, key, value):
+        widget = self.form_widgets[key]
+        widget.config(state="normal")
+        widget.delete(0, tk.END)
+        widget.insert(0, str(value))
+        widget.config(state="readonly")
+
+    def add_education(self, event=None):
+        selected = self.edu_combo.get().strip()
+        current = self.form_widgets["Education"].get().strip()
+
+        if not selected:
+            return
+
+        if current == "":
+            new_text = selected
+        else:
+            existing = [x.strip().lower() for x in current.split(",")]
+            if selected.lower() in existing:
+                return
+            new_text = current + ", " + selected
+
+        self.form_widgets["Education"].delete(0, tk.END)
+        self.form_widgets["Education"].insert(0, new_text)
+        self.update_score_fields()
+
+    def normalize_yes_no(self, value):
+        return "Yes" if value.strip().lower() == "yes" else "No"
+
+    def extract_name_from_resume(self, text, filepath=""):
+        lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+        if lines:
+            first = lines[0]
+            if len(first.split()) <= 5 and not any(ch.isdigit() for ch in first):
+                return first.title()
+        if filepath:
+            return os.path.splitext(os.path.basename(filepath))[0].replace("_", " ").replace("-", " ").title()
+        return ""
+
+    def extract_skills(self, text):
+        text_lower = str(text).lower()
+        found = []
+        for skill in self.GLOBAL_SKILLS:
+            if skill in text_lower:
+                found.append(skill.title())
+        return sorted(set(found))
+
+    def infer_education(self, text):
+        text_lower = str(text).lower()
+        found = []
+        for edu in self.EDUCATION_OPTIONS:
+            if edu.lower() in text_lower:
+                found.append(edu)
+        return ", ".join(sorted(set(found)))
+
+    def infer_experience(self, text):
+        text_lower = str(text).lower()
+        patterns = [r'(\d+)\+?\s+years', r'(\d+)\+?\s+yrs', r'experience\s*[:\-]?\s*(\d+)']
+        values = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text_lower)
+            for m in matches:
+                try:
+                    values.append(int(m))
+                except Exception:
+                    pass
+        return str(max(values)) if values else ""
+
+    def infer_role(self, skills):
+        skill_set = {s.lower() for s in skills}
+        best_role = "General"
+        best_score = -1
+        for role, role_skills in self.ROLE_SKILLS.items():
+            overlap = len(skill_set.intersection(role_skills))
+            if overlap > best_score:
+                best_score = overlap
+                best_role = role
+        return best_role
+
+    def rule_resume_score(self, record):
+        score = 0
+        role = record["Role"].strip()
+        experience = record["Experience"].strip()
+        education = record["Education"].strip().lower()
+        skills_text = record["Skills"].strip().lower()
+        selected = record["Selected"].strip().lower()
+
+        try:
+            exp_val = int(experience)
+            score += min(exp_val * 5, 30)
+        except ValueError:
+            pass
+
+        edu_items = [e.strip() for e in education.split(",") if e.strip()]
+        for degree in edu_items:
+            for key, value in self.EDUCATION_SCORES.items():
+                if key in degree:
+                    score += value
+                    break
+
+        skill_items = [s.strip() for s in skills_text.split(",") if s.strip()]
+        skill_set = set(skill_items)
+
+        role_map = self.ROLE_SKILLS.get(role, self.ROLE_SKILLS["General"])
+        role_hits = 0
+        for skill_name in role_map:
+            if skill_name in skill_set:
+                score += 8
+                role_hits += 1
+
+        score += min(len(skill_items) * 2, 20)
+        score += min(role_hits * 3, 12)
+
+        if selected == "yes":
+            score += 5
+
+        return min(score, 100)
+
+    def build_feature_text(self, record):
+        return " ".join([
+            record.get("Role", ""),
+            record.get("Department", ""),
+            record.get("Experience", ""),
+            record.get("Education", ""),
+            record.get("Skills", ""),
+            record.get("ResumeScore", ""),
+        ])
+
+    def ml_predict_score(self, record):
+        if self.ml_pipeline is None:
+            return 0
+        try:
+            text = self.build_feature_text(record)
+            if hasattr(self.ml_pipeline, "predict_proba"):
+                proba = self.ml_pipeline.predict_proba([text])[0][1]
+                return int(round(proba * 100))
+            pred = self.ml_pipeline.predict([text])[0]
+            return 100 if str(pred).lower() in ("1", "yes", "true", "selected") else 0
+        except Exception:
+            return 0
+
+    def final_score(self, resume_score, ml_score):
+        if self.ml_pipeline is not None:
+            score = (0.60 * resume_score) + (0.40 * ml_score)
+        else:
+            score = resume_score
+        return int(round(score))
+
+    def calculate_status(self, score):
+        if score >= 75:
+            return "Shortlisted"
+        elif score >= 50:
+            return "Review"
+        return "Rejected"
+
+    def validate_form(self):
+        name = self.form_widgets["Name"].get().strip()
+        role = self.form_widgets["Role"].get().strip()
+        exp = self.form_widgets["Experience"].get().strip()
+        salary = self.form_widgets["Salary"].get().strip()
+
+        if not name:
+            messagebox.showerror("Validation Error", "Name is required.")
+            self.form_widgets["Name"].focus_set()
+            return False
+
+        if not role:
+            messagebox.showerror("Validation Error", "Role is required.")
+            self.form_widgets["Role"].focus_set()
+            return False
+
+        if exp:
+            try:
+                exp_val = int(exp)
+                if exp_val < 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror("Validation Error", "Experience must be a valid non-negative whole number.")
+                self.form_widgets["Experience"].focus_set()
+                return False
+
+        if salary:
+            try:
+                sal_val = int(salary)
+                if sal_val < 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror("Validation Error", "Salary must be a valid non-negative whole number.")
+                self.form_widgets["Salary"].focus_set()
+                return False
+
+        return True
+
+    def build_record_from_form(self, existing_id=None):
+        selected = self.normalize_yes_no(self.form_widgets["Selected"].get())
+        record = {
+            "ID": existing_id if existing_id else self.generate_id(),
+            "Name": self.form_widgets["Name"].get().strip(),
+            "Role": self.form_widgets["Role"].get().strip(),
+            "Department": self.form_widgets["Department"].get().strip(),
+            "Experience": self.form_widgets["Experience"].get().strip(),
+            "Education": self.form_widgets["Education"].get().strip(),
+            "Skills": self.form_widgets["Skills"].get().strip(),
+            "Salary": self.form_widgets["Salary"].get().strip(),
+            "Selected": selected,
+            "ResumeScore": "",
+            "MLScore": "",
+            "Score": "",
+            "Status": "",
+            "SourceFile": os.path.basename(self.current_resume_path) if self.current_resume_path else ""
+        }
+
+        resume_score = self.rule_resume_score(record)
+        ml_score = self.ml_predict_score({**record, "ResumeScore": str(resume_score)})
+        total_score = self.final_score(resume_score, ml_score)
+
+        record["ResumeScore"] = str(resume_score)
+        record["MLScore"] = str(ml_score)
+        record["Score"] = str(total_score)
+        record["Status"] = self.calculate_status(total_score)
+        return record
+
+    def update_score_fields(self, event=None):
+        temp_record = {
+            "ID": "",
+            "Name": self.form_widgets["Name"].get().strip(),
+            "Role": self.form_widgets["Role"].get().strip(),
+            "Department": self.form_widgets["Department"].get().strip(),
+            "Experience": self.form_widgets["Experience"].get().strip(),
+            "Education": self.form_widgets["Education"].get().strip(),
+            "Skills": self.form_widgets["Skills"].get().strip(),
+            "Salary": self.form_widgets["Salary"].get().strip(),
+            "Selected": self.normalize_yes_no(self.form_widgets["Selected"].get()),
+            "ResumeScore": "",
+            "MLScore": "",
+            "Score": "",
+            "Status": "",
+            "SourceFile": os.path.basename(self.current_resume_path) if self.current_resume_path else ""
+        }
+
+        resume_score = self.rule_resume_score(temp_record)
+        ml_score = self.ml_predict_score({**temp_record, "ResumeScore": str(resume_score)})
+        total_score = self.final_score(resume_score, ml_score)
+        status = self.calculate_status(total_score)
+
+        self.form_widgets["ResumeScore"].config(text=str(resume_score))
+        self.form_widgets["MLScore"].config(text=str(ml_score))
+        self.form_widgets["Score"].config(text=str(total_score))
+        self.form_widgets["Status"].config(text=status)
+    def clear_form(self):
+        for key, widget in self.form_widgets.items():
+            if key in ("ResumeScore", "MLScore", "Score", "Status"):
+                widget.config(text="0" if key != "Status" else "")
+            elif isinstance(widget, ttk.Combobox):
+                widget.set("")
+            else:
+                widget.delete(0, tk.END)
+
+        self.edu_combo.set("")
+        self.current_resume_path = ""
+        self.current_resume_text = ""
+        self.source_file_var.set("Resume Source: None")
+        self.form_widgets["Name"].focus_set()
+        self.update_score_fields()
+
+    # ---------------- RESUME PARSING ----------------
+    def read_resume_file(self, file_path):
+        ext = os.path.splitext(file_path)[1].lower()
+        try:
+            if ext == ".txt":
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    return f.read()
+
+            if ext == ".pdf":
+                if pdfplumber is None:
+                    raise RuntimeError("pdfplumber is not installed. Run: pip install pdfplumber")
+                text_parts = []
+                with pdfplumber.open(file_path) as pdf:
+                    for page in pdf.pages:
+                        text_parts.append(page.extract_text() or "")
+                return "\n".join(text_parts)
+
+            if ext == ".docx":
+                if Document is None:
+                    raise RuntimeError("python-docx is not installed. Run: pip install python-docx")
+                doc = Document(file_path)
+                return "\n".join([p.text for p in doc.paragraphs])
+
+            raise RuntimeError("Unsupported file format. Please upload TXT, PDF, or DOCX.")
+        except Exception as e:
+            raise RuntimeError(f"Could not read resume file.\n{e}")
+
+    def upload_resume(self):
+        file_path = filedialog.askopenfilename(
+            title="Select Resume File",
+            filetypes=[
+                ("Resume Files", "*.txt *.pdf *.docx"),
+                ("Text Files", "*.txt"),
+                ("PDF Files", "*.pdf"),
+                ("Word Files", "*.docx")
+            ]
+        )
+        if not file_path:
+            return
+
+        try:
+            text = self.read_resume_file(file_path)
+            self.current_resume_path = file_path
+            self.current_resume_text = text
+            self.source_file_var.set(f"Resume Source: {os.path.basename(file_path)}")
+            self.set_status(f"Resume loaded: {os.path.basename(file_path)}")
+            messagebox.showinfo("Success", "Resume file loaded successfully.")
+            self.update_score_fields()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def auto_parse_resume(self):
+        if not self.current_resume_text.strip():
+            messagebox.showerror("Error", "Please upload a resume first.")
+            return
+
+        text = self.current_resume_text
+        skills = self.extract_skills(text)
+        role = self.infer_role(skills)
+        education = self.infer_education(text)
+        experience = self.infer_experience(text)
+        name = self.extract_name_from_resume(text, self.current_resume_path)
+
+        self.form_widgets["Name"].delete(0, tk.END)
+        self.form_widgets["Name"].insert(0, name)
+        self.form_widgets["Role"].set("")
+        self.form_widgets["Department"].delete(0, tk.END)
+
+        self.form_widgets["Experience"].delete(0, tk.END)
+        self.form_widgets["Experience"].insert(0, experience)
+
+        self.form_widgets["Education"].delete(0, tk.END)
+        self.form_widgets["Education"].insert(0, education)
+
+        self.form_widgets["Skills"].delete(0, tk.END)
+        self.form_widgets["Skills"].insert(0, ", ".join(skills))
+
+        self.form_widgets["Selected"].set("No")
+        self.update_score_fields()
+        self.set_status("Resume auto-parsed successfully.")
+
+    # ---------------- ML MODEL ----------------
+    def load_model_if_exists(self):
+        if not os.path.exists(self.model_file):
+            self.model_info_var.set("ML Model: Not trained")
+            return
+
+        try:
+            if joblib is not None:
+                self.ml_pipeline = joblib.load(self.model_file)
+            else:
+                with open(self.model_file, "rb") as f:
+                    self.ml_pipeline = pickle.load(f)
+            self.model_info_var.set("ML Model: Trained")
+        except Exception:
+            self.ml_pipeline = None
+            self.model_info_var.set("ML Model: Failed to load")
+
+    def train_model_from_dataset(self):
+        if not SKLEARN_AVAILABLE:
+            messagebox.showerror("Missing Dependency", "scikit-learn is not installed.\nRun: pip install scikit-learn")
+            return
+
+        rows = self.read_rows()
+        if len(rows) < 6:
+            messagebox.showerror("Error", "Need at least 6 records to train a model.")
+            return
+
+        usable = [row for row in rows if row.get("Selected", "").strip().lower() in ("yes", "no")]
+        if len(usable) < 6:
+            messagebox.showerror("Error", "Not enough labeled records with Selected = Yes/No.")
+            return
+
+        texts = []
+        labels = []
+        for row in usable:
+            texts.append(self.build_feature_text(row))
+            labels.append(1 if row["Selected"].strip().lower() == "yes" else 0)
+
+        try:
+            if len(set(labels)) < 2:
+                messagebox.showerror("Error", "Training requires both Yes and No labels.")
+                return
+
+            X_train, X_test, y_train, y_test = train_test_split(
+                texts, labels, test_size=0.3, random_state=42, stratify=labels
+            )
+
+            pipeline = Pipeline([
+                ("tfidf", TfidfVectorizer(stop_words="english")),
+                ("clf", LogisticRegression(max_iter=1000))
+            ])
+            pipeline.fit(X_train, y_train)
+
+            _ = pipeline.predict(X_test)
+
+            self.ml_pipeline = pipeline
+
+            if joblib is not None:
+                joblib.dump(self.ml_pipeline, self.model_file)
+            else:
+                with open(self.model_file, "wb") as f:
+                    pickle.dump(self.ml_pipeline, f)
+
+            self.model_info_var.set("ML Model: Trained")
+            self.recalculate_all_scores(silent=True)
+            self.set_status("ML model trained successfully.")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Model training failed.\n\n{e}")
+
+    def recalculate_all_scores(self, silent=False):
+        rows = self.read_rows()
+        if not rows:
+            if not silent:
+                messagebox.showerror("Error", "No records found.")
+            return
+
+        updated_rows = []
+
+        for row in rows:
+            row = self.ensure_row_schema(row)
+
+            resume_score = self.rule_resume_score(row)
+            ml_score = self.ml_predict_score({
+                **row,
+                "ResumeScore": str(resume_score)
+            })
+            total = self.final_score(resume_score, ml_score)
+
+            row["ResumeScore"] = str(resume_score)
+            row["MLScore"] = str(ml_score)
+            row["Score"] = str(total)
+            row["Status"] = self.calculate_status(total)
+
+            updated_rows.append(row)
+
+        self.write_rows(updated_rows)
+        self.replace_mysql_from_rows(updated_rows)
+        self.load_data()
+        self.refresh_ui_summary()
+        self.update_score_fields()
+
+        if not silent:
+            self.set_status("All candidate scores recalculated.")
+
+    # ---------------- TABLE ----------------
+    def score_tag(self, score):
+        try:
+            value = float(score)
+        except Exception:
+            return "low"
+        if value >= 75:
+            return "high"
+        elif value >= 50:
+            return "medium"
+        return "low"
+
+    def populate_tree(self, rows):
+        self.tree.delete(*self.tree.get_children())
+        self.filtered_ids = []
+        self.filtered_rows = rows[:]
+
+        for row in rows:
+            values = [row.get(col, "") for col in self.LABELS]
+            self.tree.insert("", "end", values=values, tags=(self.score_tag(row.get("Score", "0")),))
+            self.filtered_ids.append(row.get("ID", ""))
+
+        self.update_title()
+        self.set_status(f"Loaded {len(rows)} records.")
+
+    def load_data(self):
+        rows = self.read_rows()
+        self.populate_tree(rows)
+
+    def load_selected_row(self, event=None):
+        selected_item = self.tree.focus()
+        if not selected_item:
+            return
+
+        values = self.tree.item(selected_item, "values")
+        if not values:
+            return
+
+        data = dict(zip(self.LABELS, values))
+
+        for field in ["Name", "Department", "Experience", "Education", "Skills", "Salary"]:
+            self.form_widgets[field].delete(0, tk.END)
+            self.form_widgets[field].insert(0, data.get(field, ""))
+
+        self.form_widgets["Role"].set(data.get("Role", ""))
+        self.form_widgets["Selected"].set(data.get("Selected", ""))
+
+        self.form_widgets["ResumeScore"].config(text=data.get("ResumeScore", "0"))
+        self.form_widgets["MLScore"].config(text=data.get("MLScore", "0"))
+        self.form_widgets["Score"].config(text=data.get("Score", "0"))
+        self.form_widgets["Status"].config(text=data.get("Status", ""))
+
+        self.current_resume_path = data.get("SourceFile", "")
+        self.source_file_var.set(f"Resume Source: {data.get('SourceFile', '') or 'None'}")
+        self.set_status(f"Editing candidate: {data.get('Name', '')} ({data.get('ID', '')})")
+
+    def open_candidate_details(self):
+        selected_item = self.tree.focus()
+        if not selected_item:
+            messagebox.showerror("Error", "Please select a candidate first.")
+            return
+
+        values = self.tree.item(selected_item, "values")
+        if not values:
+            messagebox.showerror("Error", "No candidate data found.")
+            return
+
+        data = dict(zip(self.LABELS, values))
+
+        details_window = tk.Toplevel(self.root)
+        details_window.title("Candidate Details")
+        details_window.geometry("700x620")
+        details_window.configure(bg=self.COLORS["bg"])
+        details_window.transient(self.root)
+
+        container = tk.Frame(details_window, bg=self.COLORS["bg"], padx=16, pady=16)
+        container.pack(fill="both", expand=True)
+
+        tk.Label(
+            container,
+            text=data.get("Name", "Candidate"),
+            font=("Segoe UI", 18, "bold"),
+            bg=self.COLORS["bg"],
+            fg=self.COLORS["text"]
+        ).pack(anchor="w", pady=(0, 4))
+
+        tk.Label(
+            container,
+            text=f"{data.get('Role', '')} | {data.get('Department', '')}",
+            font=("Segoe UI", 10),
+            bg=self.COLORS["bg"],
+            fg=self.COLORS["muted"]
+        ).pack(anchor="w", pady=(0, 12))
+
+        info_card = tk.Frame(
+            container,
+            bg=self.COLORS["surface"],
+            bd=1,
+            relief="solid",
+            padx=14,
+            pady=12
+        )
+        info_card.pack(fill="x", pady=(0, 12))
+
+        fields = [
+            ("Experience", data.get("Experience", "")),
+            ("Education", data.get("Education", "")),
+            ("Skills", data.get("Skills", "")),
+            ("Salary", data.get("Salary", "")),
+            ("Selected", data.get("Selected", "")),
+            ("Source File", data.get("SourceFile", "")),
+        ]
+
+        for label, value in fields:
+            row = tk.Frame(info_card, bg=self.COLORS["surface"])
+            row.pack(fill="x", pady=4)
+
+            tk.Label(
+                row,
+                text=f"{label}:",
+                width=14,
+                anchor="w",
+                font=("Segoe UI", 10, "bold"),
+                bg=self.COLORS["surface"],
+                fg=self.COLORS["text"]
+            ).pack(side="left")
+   
+            tk.Label(
+                row,
+                text=value if value else "-",
+                anchor="w",
+                justify="left",
+                wraplength=480,
+                font=("Segoe UI", 10),
+                bg=self.COLORS["surface"],
+                fg=self.COLORS["text"]
+            ).pack(side="left", fill="x", expand=True)
+
+        tk.Label(
+            container,
+            text="Evaluation Scores",
+            font=("Segoe UI", 11, "bold"),
+            bg=self.COLORS["bg"],
+            fg=self.COLORS["text"]
+        ).pack(anchor="w", pady=(4, 8))
+
+        score_frame = tk.Frame(container, bg=self.COLORS["bg"])
+        score_frame.pack(fill="x")
+
+        scores = [
+            ("Resume Score", data.get("ResumeScore", "0")),
+            ("ML Score", data.get("MLScore", "0")),
+            ("Final Score", data.get("Score", "0")),
+            ("Status", data.get("Status", "")),
+        ]
+  
+        for title, value in scores:
+            box = tk.Frame(
+                score_frame,
+                bg="#eef4ff",
+                bd=1,
+                relief="solid",
+                padx=12,
+                pady=10
+            )
+            box.pack(side="left", fill="both", expand=True, padx=6)
+
+            tk.Label(
+                box,
+                text=title,
+                font=("Segoe UI", 9),
+                bg="#eef4ff",
+                fg=self.COLORS["muted"]
+            ).pack(anchor="w")
+
+            tk.Label(
+                box,
+                text=str(value),
+                font=("Segoe UI", 14, "bold"),
+                bg="#eef4ff",
+                fg=self.COLORS["text"]
+            ).pack(anchor="w", pady=(6, 0))
+
+        button_row = tk.Frame(container, bg=self.COLORS["bg"])
+        button_row.pack(fill="x", pady=(18, 0))
+
+        ttk.Button(
+            button_row,
+            text="Close",
+            command=details_window.destroy,
+            style="Secondary.TButton"
+        ).pack(side="right")
+
+    # ---------------- CRUD ----------------
+    def add_candidate(self, event=None):
+        if not self.validate_form():
+            return
+        rows = self.read_rows()
+        record = self.build_record_from_form()
+        rows.append(record)
+        self.write_rows(rows)
+        self.replace_mysql_from_rows(rows)
+        self.load_data()
+        self.refresh_ui_summary()
+        self.clear_form()
+        self.set_status("Candidate added successfully.")
+
+    def get_selected_id(self):
+        selected_item = self.tree.focus()
+        if not selected_item:
+            return None
+        values = self.tree.item(selected_item, "values")
+        return values[0] if values else None
+
+    def update_candidate(self):
+        if not self.validate_form():
+            return
+
+        selected_id = self.get_selected_id()
+        if not selected_id:
+            messagebox.showerror("Error", "Please select a candidate to update.")
+            return
+
+        rows = self.read_rows()
+        updated = False
+        new_record = None
+
+        for i, row in enumerate(rows):
+            if row["ID"] == selected_id:
+                existing_file = row.get("SourceFile", "")
+                new_record = self.build_record_from_form(existing_id=selected_id)
+                if not new_record["SourceFile"]:
+                    new_record["SourceFile"] = existing_file
+                rows[i] = new_record
+                updated = True
+                break
+
+        if not updated:
+            messagebox.showerror("Error", "Selected candidate not found.")
+            return
+
+        self.write_rows(rows)
+        self.replace_mysql_from_rows(rows)
+        self.load_data()
+        self.refresh_ui_summary()
+        self.clear_form()
+        self.set_status("Candidate updated successfully.")
+
+    def delete_candidate(self, event=None):
+        selected_id = self.get_selected_id()
+        if not selected_id:
+            messagebox.showerror("Error", "Please select a candidate to delete.")
+            return
+
+        if not messagebox.askyesno("Confirm Delete", "Are you sure you want to delete this candidate?"):
+            return
+
+        rows = self.read_rows()
+        new_rows = [row for row in rows if row["ID"] != selected_id]
+
+        if len(new_rows) == len(rows):
+            messagebox.showerror("Error", "Selected candidate not found.")
+            return
+
+        self.write_rows(new_rows)
+        self.replace_mysql_from_rows(new_rows)
+        self.load_data()
+        self.refresh_ui_summary()
+        self.clear_form()
+        self.set_status("Candidate deleted successfully.")
+
+    # ---------------- SEARCH / SORT ----------------
+    def search_data(self, event=None):
+        column = self.search_column.get()
+        keyword = self.search_entry.get().strip().lower()
+
+        rows = self.read_rows()
+        filtered = []
+
+        for row in rows:
+            value = str(row.get(column, "")).lower()
+            if keyword in value:
+                filtered.append(row)
+
+        self.populate_tree(filtered)
+        self.replace_data_updated_from_rows(filtered)
+
+        self.set_status(
+            f"Search complete. {len(filtered)} records saved to data_updated."
+        )
+        
+    def quick_search_data(self, event=None):
+        keyword = self.global_search.get().strip().lower()
+        if not keyword:
+            self.load_data()
+            self.replace_data_updated_from_rows(self.read_rows())
+            return
+
+        rows = self.read_rows()
+        filtered = []
+
+        searchable_columns = [
+            "Name", "Role", "Department", "Experience",
+            "Education", "Skills", "Salary", "Selected",
+            "Score", "Status", "ResumeScore", "MLScore", "SourceFile"
+        ]
+
+        for row in rows:
+            for col in searchable_columns:
+                if keyword in str(row.get(col, "")).lower():
+                    filtered.append(row)
+                    break
+
+        self.populate_tree(filtered)
+        self.replace_data_updated_from_rows(filtered)
+
+        self.set_status(
+            f"Quick search complete. {len(filtered)} matching records found. "
+            "data_updated table refreshed."
+    )
+
+    def sort_data(self, reverse=False):
+        column = self.sort_column.get()
+
+        rows = [
+            dict(zip(self.LABELS, self.tree.item(item, "values")))
+            for item in self.tree.get_children()
+        ]
+
+        if not rows:
+            return
+
+        def sort_key(row):
+            value = row.get(column, "")
+            try:
+                return float(value)
+            except:
+                return str(value).lower()
+
+        rows.sort(key=sort_key, reverse=reverse)
+        self.populate_tree(rows)
+        self.set_status(f"Sorted by {column}.")
+
+    def filter_by_status(self, status):
+        rows = self.read_rows()
+        filtered = [row for row in rows if row.get("Status", "") == status]
+        self.populate_tree(filtered)
+        self.set_status(f"Showing {status} candidates.")
+
+        def sort_key(row):
+            value = row.get(column, "")
+            try:
+                return float(value)
+            except ValueError:
+                return str(value).lower()
+
+        rows.sort(key=sort_key, reverse=reverse)
+        self.populate_tree(rows)
+        self.set_status(f"Sorted visible records by {column}.")
+
+    # ---------------- IMPORT ----------------
+    def import_csv(self):
+        file_path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")], title="Select CSV File")
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                imported_rows = list(reader)
+
+            if not imported_rows:
+                messagebox.showerror("Error", "Selected CSV is empty.")
+                return
+
+            final_rows = []
+            for row in imported_rows:
+                role = row.get("Role", "General").strip() or "General"
+                record = {
+                    "ID": row.get("ID", "").strip() or self.generate_id(),
+                    "Name": row.get("Name", "").strip(),
+                    "Role": role,
+                    "Department": row.get("Department", "").strip(),
+                    "Experience": row.get("Experience", "").strip(),
+                    "Education": row.get("Education", "").strip(),
+                    "Skills": row.get("Skills", "").strip(),
+                    "Salary": row.get("Salary", "").strip(),
+                    "Selected": self.normalize_yes_no(row.get("Selected", "No")),
+                    "ResumeScore": "",
+                    "MLScore": "",
+                    "Score": "",
+                    "Status": "",
+                    "SourceFile": row.get("SourceFile", "").strip()
+                }
+
+                resume_score = self.rule_resume_score(record)
+                ml_score = self.ml_predict_score({**record, "ResumeScore": str(resume_score)})
+                total = self.final_score(resume_score, ml_score)
+
+                record["ResumeScore"] = str(resume_score)
+                record["MLScore"] = str(ml_score)
+                record["Score"] = str(total)
+                record["Status"] = self.calculate_status(total)
+                final_rows.append(record)
+
+            self.write_rows(final_rows)
+            self.replace_mysql_from_rows(final_rows)
+            self.load_data()
+            self.refresh_ui_summary()
+            self.clear_form()
+            self.set_status("CSV imported successfully into shared data file.")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to import CSV.\n\n{e}")
+
+    # ---------------- TABLEAU ----------------
+    def open_tableau_file(self, path):
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.run(["open", path], check=False)
+            else:
+                subprocess.run(["xdg-open", path], check=False)
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open Tableau file.\n\n{e}")
+
+    def open_tableau_dashboard(self):
+        try:
+            if not os.path.exists(self.data_file):
+                messagebox.showerror(
+                    "Data File Missing",
+                    f"Shared CSV data file not found.\n\nExpected file:\n{self.data_file}"
+                )
+                return
+
+            if not os.path.exists(self.tableau_file):
+                messagebox.showerror(
+                    "Tableau File Missing",
+                    f"Tableau workbook not found.\n\nExpected file:\n{self.tableau_file}\n\n"
+                    "Save your Tableau dashboard as 'resume_dashboard.twb' in the same folder as this Python script."
+                )
+                return
+
+            self.set_status("Opening Tableau dashboard...")
+            messagebox.showinfo(
+                "Open Tableau Dashboard",
+                "Opening Tableau workbook.\n\n"
+                "This workbook should be connected to MySQL.\n\n"
+                "Expected source:\n"
+                "Server: localhost\n"
+                "Database: resume_db\n"
+                "Table: resume_table\n\n"
+                "Use Tableau Refresh Data to load the latest app data."
+            )
+            self.open_tableau_file(self.tableau_file)
+            self.set_status("Tableau dashboard opened using shared live CSV.")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open Tableau dashboard.\n\n{e}")
+
+    def open_filtered_tableau_dashboard(self):
+        rows_to_save = self.filtered_rows if self.filtered_rows else self.read_rows()
+        self.replace_data_updated_from_rows(rows_to_save)
+
+        if not hasattr(self, "filtered_tableau_file"):
+            self.filtered_tableau_file = os.path.join(
+                self.base_dir,
+                "resume_dashboard_filtered.twb"
+            )
+
+        if not os.path.exists(self.filtered_tableau_file):
+            messagebox.showerror(
+                "Tableau File Missing",
+                f"Filtered Tableau workbook not found:\n{self.filtered_tableau_file}"
+            )
+            return
+
+        self.open_tableau_file(self.filtered_tableau_file)
+        self.set_status("Filtered Tableau opened using data_updated table.")
+
+            # ---------------- LOCAL DASHBOARD ----------------
+    def ask_dashboard_settings(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Dashboard Settings")
+        dialog.geometry("460x260")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.configure(bg=self.COLORS["bg"])
+
+        result = {"ok": False}
+
+        container = tk.Frame(dialog, bg=self.COLORS["bg"], padx=16, pady=16)
+        container.pack(fill="both", expand=True)
+
+        tk.Label(
+            container,
+            text="Enter MySQL Password",
+            bg=self.COLORS["bg"],
+            fg=self.COLORS["text"],
+            font=("Segoe UI", 10, "bold")
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+        mysql_password_entry = ttk.Entry(container, width=50, show="*")
+        mysql_password_entry.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        mysql_password_entry.insert(0, self.db_config.get("password", ""))
+
+        show_password_var = tk.BooleanVar(value=False)
+
+        def toggle_password():
+            mysql_password_entry.config(show="" if show_password_var.get() else "*")
+
+        ttk.Checkbutton(
+            container,
+            text="Show Password",
+            variable=show_password_var,
+            command=toggle_password
+        ).grid(row=2, column=0, sticky="w", pady=(0, 12))
+
+        tk.Label(
+            container,
+            text="Enter Flask Server Address",
+            bg=self.COLORS["bg"],
+            fg=self.COLORS["text"],
+            font=("Segoe UI", 10, "bold")
+        ).grid(row=3, column=0, sticky="w", pady=(0, 6))
+
+        flask_address_entry = ttk.Entry(container, width=50)
+        flask_address_entry.grid(row=4, column=0, sticky="ew", pady=(0, 14))
+        flask_address_entry.insert(0,self.flask_server_address)
+
+        button_row = tk.Frame(container, bg=self.COLORS["bg"])
+        button_row.grid(row=5, column=0, sticky="e")
+
+        def on_ok():
+            self.db_config["password"] = mysql_password_entry.get().strip()
+            self.flask_server_address = flask_address_entry.get().strip()
+            result["ok"] = True
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        ttk.Button(
+            button_row,
+            text="Cancel",
+            command=on_cancel,
+            style="Secondary.TButton"
+        ).pack(side="right", padx=(8, 0))
+
+        ttk.Button(
+            button_row,
+            text="OK",
+            command=on_ok,
+            style="Primary.TButton"
+        ).pack(side="right")
+
+        container.grid_columnconfigure(0, weight=1)
+        self.root.wait_window(dialog)
+        return result["ok"]
+
+    def ask_dashboard_settings(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Dashboard Settings")
+        dialog.geometry("420x220")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.configure(bg=self.COLORS["bg"])
+
+        result = {"ok": False}
+
+        container = tk.Frame(dialog, bg=self.COLORS["bg"], padx=16, pady=16)
+        container.pack(fill="both", expand=True)
+
+        tk.Label(
+            container,
+            text="Enter MySQL Password",
+            bg=self.COLORS["bg"],
+            fg=self.COLORS["text"],
+            font=("Segoe UI", 10, "bold")
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+        mysql_password_entry = ttk.Entry(container, width=36, show="*")
+        mysql_password_entry.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        mysql_password_entry.insert(0, self.db_config.get("password", ""))
+
+        tk.Label(
+            container,
+            text="Enter Flask Server Address",
+            bg=self.COLORS["bg"],
+            fg=self.COLORS["text"],
+            font=("Segoe UI", 10, "bold")
+        ).grid(row=2, column=0, sticky="w", pady=(0, 6))
+
+        
+        self.update_flask_address_automatically()
+
+        tk.Label(
+            container,
+            text="Flask Server Address (Auto)",
+            bg=self.COLORS["bg"],
+            fg=self.COLORS["text"],
+            font=("Segoe UI", 10, "bold")
+        ).grid(row=3, column=0, sticky="w", pady=(0, 6))
+
+        flask_address_entry = ttk.Entry(container, width=50)
+        flask_address_entry.grid(row=4, column=0, sticky="ew", pady=(0, 14))
+
+# show detected IP
+        flask_address_entry.insert(0, self.flask_server_address)
+
+# make it read-only (cannot edit)
+        flask_address_entry.config(state="readonly")
+
+        button_row = tk.Frame(container, bg=self.COLORS["bg"])
+        button_row.grid(row=5, column=0, sticky="e")
+
+        def on_ok():
+            self.db_config["password"] = mysql_password_entry.get().strip()
+            result["ok"] = True
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        ttk.Button(
+            button_row,
+            text="Cancel",
+            command=on_cancel,
+            style="Secondary.TButton"
+        ).pack(side="right", padx=(8, 0))
+
+        ttk.Button(
+            button_row,
+            text="OK",
+            command=on_ok,
+            style="Primary.TButton"
+        ).pack(side="right")
+
+        container.grid_columnconfigure(0, weight=1)
+        self.root.wait_window(dialog)
+        return result["ok"]
+
+    def open_dashboard(self):        
+        rows = self.filtered_rows if self.filtered_rows else self.read_rows()
+        if not rows:
+            messagebox.showerror("Error", "No data available to build dashboard.")
+            return
+
+        dashboard = tk.Toplevel(self.root)
+        
+        dashboard.title("Recruitment Analytics Dashboard")
+        dashboard.geometry("1350x860")
+
+        summary_frame = ttk.Frame(dashboard, padding=10)
+        summary_frame.pack(fill="x")
+
+        total_candidates = len(rows)
+        shortlisted = sum(1 for r in rows if r["Status"] == "Shortlisted")
+        review = sum(1 for r in rows if r["Status"] == "Review")
+        rejected = sum(1 for r in rows if r["Status"] == "Rejected")
+        avg_score = round(sum(float(r["Score"] or 0) for r in rows) / total_candidates, 2) if total_candidates else 0
+        avg_ml = round(sum(float(r["MLScore"] or 0) for r in rows) / total_candidates, 2) if total_candidates else 0
+        avg_resume = round(sum(float(r["ResumeScore"] or 0) for r in rows) / total_candidates, 2) if total_candidates else 0
+
+        summaries = [
+            ("Total Candidates", total_candidates),
+            ("Shortlisted", shortlisted),
+            ("Review", review),
+            ("Rejected", rejected),
+            ("Avg Final Score", avg_score),
+            ("Avg Resume Score", avg_resume),
+            ("Avg ML Score", avg_ml)
+        ]
+
+        for i, (label, value) in enumerate(summaries):
+            box = ttk.LabelFrame(summary_frame, text=label, padding=10)
+            box.grid(row=0, column=i, padx=8, pady=5, sticky="nsew")
+            ttk.Label(box, text=str(value), font=("Segoe UI", 14, "bold")).pack()
+
+        for i in range(len(summaries)):
+            summary_frame.grid_columnconfigure(i, weight=1)
+
+        chart_frame = ttk.Frame(dashboard, padding=10)
+        chart_frame.pack(fill="both", expand=True)
+
+        fig = Figure(figsize=(13, 4), dpi=100)
+        ax1 = fig.add_subplot(131)
+        ax2 = fig.add_subplot(132)
+        ax3 = fig.add_subplot(133)
+
+        dept_counts = Counter(r["Department"] or "Unknown" for r in rows)
+        role_counts = Counter(r["Role"] or "Unknown" for r in rows)
+        status_counts = Counter(r["Status"] or "Unknown" for r in rows)
+
+        dept_labels = list(dept_counts.keys())
+        dept_values = list(dept_counts.values())
+        dept_colors = ["#3b82f6", "#22c55e", "#f59e0b", "#ef4444", "#8b5cf6", "#14b8a6", "#f97316"]
+        bars1 = ax1.bar(
+            dept_labels,
+            dept_values,
+            color=dept_colors[:len(dept_labels)],
+            picker=True
+        )
+        ax1.set_title("Candidates by Department")
+        ax1.tick_params(axis="x", rotation=30)
+
+        role_labels = list(role_counts.keys())
+        role_values = list(role_counts.values())
+        role_colors = ["#06b6d4", "#84cc16", "#f97316", "#ec4899", "#6366f1", "#eab308", "#10b981"]
+        bars2 = ax2.bar(
+            role_labels,
+            role_values,
+            color=role_colors[:len(role_labels)],
+            picker=True
+        )
+        ax2.set_title("Candidates by Role")
+        ax2.tick_params(axis="x", rotation=30)
+
+        wedges, _texts, _autotexts = ax3.pie(
+            list(status_counts.values()),
+            labels=list(status_counts.keys()),
+            autopct="%1.1f%%"
+        )
+        ax3.set_title("Selection Status Distribution")
+        for wedge in wedges:
+            wedge.set_picker(True)
+
+        role_groups = defaultdict(list)
+
+        for row in rows:
+            role = row.get("Role", "Unknown").strip() or "Unknown"
+            role_groups[role].append(row)
+
+        role_items = list(role_groups.items())
+        role_count = len(role_items)
+
+        cols = 2 if role_count <= 4 else 3
+        rows_needed = math.ceil(role_count / cols)
+        
+        fig.tight_layout()
+
+        canvas_widget = FigureCanvasTkAgg(fig, master=chart_frame)
+        canvas_widget.draw()
+        canvas_widget.get_tk_widget().pack(fill="both", expand=True)
+        
+        role_chart_frame = ttk.LabelFrame(dashboard, text="Role-wise Candidate Comparison", padding=10)
+        role_chart_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        control_frame = ttk.Frame(role_chart_frame)
+        control_frame.pack(fill="x", pady=(0, 10))
+
+        ttk.Label(control_frame, text="Select Role:").pack(side="left", padx=(0, 8))
+
+        selected_role = tk.StringVar()
+        role_names = sorted(role_groups.keys())
+        selected_role.set(role_names[0])
+
+        role_dropdown = ttk.Combobox(
+            control_frame,
+            textvariable=selected_role,
+            values=role_names,
+            state="readonly",
+            width=25
+        )
+        role_dropdown.pack(side="left")
+
+        fig2 = Figure(figsize=(11, 4.8), dpi=100)
+        ax_role = fig2.add_subplot(111)
+
+        canvas_widget2 = FigureCanvasTkAgg(fig2, master=role_chart_frame)
+        canvas_widget2.get_tk_widget().pack(fill="both", expand=True)
+
+        def update_role_chart(event=None):
+            role = selected_role.get()
+            candidates = role_groups.get(role, [])
+
+            ax_role.clear()
+
+            names = [c.get("Name", "") for c in candidates]
+            scores = [float(c.get("Score", 0) or 0) for c in candidates]
+
+            colors = ["#3b82f6", "#22c55e", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#a855f7"]
+            bar_colors = [colors[i % len(colors)] for i in range(len(names))]
+
+            ax_role.barh(names, scores, color=bar_colors)
+            ax_role.set_title(f"{role} - Candidate Comparison", fontsize=13, fontweight="bold")
+            ax_role.set_xlabel("Final Score")
+            ax_role.set_ylabel("Candidates")
+            ax_role.set_xlim(0, 100)
+
+            for i, score in enumerate(scores):
+                ax_role.text(score + 1, i, str(int(score)), va="center", fontsize=9)
+
+            fig2.tight_layout()
+            canvas_widget2.draw()
+
+        role_dropdown.bind("<<ComboboxSelected>>", update_role_chart)
+        update_role_chart()
+
+
+
+        def on_pick(event):
+            artist = event.artist
+
+            if artist in bars1:
+                index = list(bars1).index(artist)
+                dept_name = dept_labels[index]
+                matched = [r["Name"] for r in rows if (r["Department"] or "Unknown") == dept_name]
+                messagebox.showinfo(
+                    "Candidates by Department",
+                    f"Department: {dept_name}\n\nCandidates:\n" + "\n".join(matched)
+                )
+
+            elif artist in bars2:
+                index = list(bars2).index(artist)
+                role_name = role_labels[index]
+                matched = [r["Name"] for r in rows if (r["Role"] or "Unknown") == role_name]
+                messagebox.showinfo(
+                    "Candidates by Role",
+                    f"Role: {role_name}\n\nCandidates:\n" + "\n".join(matched)
+                )
+
+            elif artist == line4:
+                index = event.ind[0]
+                candidate_name = top_names[index]
+                matched_row = next((r for r in rows if r["Name"] == candidate_name), None)
+                if matched_row:
+                    messagebox.showinfo(
+                        "Candidate Details",
+                        f"Name: {matched_row['Name']}\n"
+                        f"Role: {matched_row['Role']}\n"
+                        f"Department: {matched_row['Department']}\n"
+                        f"Experience: {matched_row['Experience']}\n"
+                        f"Education: {matched_row['Education']}\n"
+                        f"Skills: {matched_row['Skills']}\n"
+                        f"Salary: {matched_row['Salary']}\n"
+                        f"Selected: {matched_row['Selected']}\n"
+                        f"ResumeScore: {matched_row['ResumeScore']}\n"
+                        f"MLScore: {matched_row['MLScore']}\n"
+                        f"Final Score: {matched_row['Score']}\n"
+                        f"Status: {matched_row['Status']}"
+                )
+
+            elif artist in wedges:
+                index = wedges.index(artist)
+                status_name = status_labels[index]
+                matched = [r["Name"] for r in rows if (r["Status"] or "Unknown") == status_name]
+                messagebox.showinfo(
+                    "Candidates by Status",
+                    f"Status: {status_name}\nCount: {status_values[index]}\n\nCandidates:\n" + "\n".join(matched)
+                )
+
+            elif artist in wedges5:
+                index = wedges5.index(artist)
+                selected_range = resume_labels[index]
+
+                matched = []
+                for r in rows:
+                    try:
+                        val = float(r["ResumeScore"] or 0)
+                        if selected_range == "0-39" and val < 40:
+                            matched.append(f"{r['Name']} ({r['ResumeScore']})")
+                        elif selected_range == "40-59" and 40 <= val < 60:
+                            matched.append(f"{r['Name']} ({r['ResumeScore']})")
+                        elif selected_range == "60-79" and 60 <= val < 80:
+                            matched.append(f"{r['Name']} ({r['ResumeScore']})")
+                        elif selected_range == "80-100" and val >= 80:
+                            matched.append(f"{r['Name']} ({r['ResumeScore']})")
+                    except Exception:
+                        pass
+
+                if matched:
+                    messagebox.showinfo(
+                        "Resume Score Range",
+                        f"Range: {selected_range}\n\nCandidates:\n" + "\n".join(matched)
+                    )
+
+            elif artist == scatter6:
+                index = event.ind[0]
+                matched_row = rows[index]
+                messagebox.showinfo(
+                    "ML Score Details",
+                    f"Name: {matched_row['Name']}\n"
+                    f"Role: {matched_row['Role']}\n"
+                    f"Department: {matched_row['Department']}\n"
+                    f"ML Score: {matched_row['MLScore']}\n"
+                    f"Resume Score: {matched_row['ResumeScore']}\n"
+                    f"Final Score: {matched_row['Score']}\n"
+                    f"Status: {matched_row['Status']}"
+                )
+
+        fig.canvas.mpl_connect("pick_event", on_pick)
+
+        self.set_status("AI dashboard opened successfully.")
+
+    def show_top_candidates(self):
+        rows = self.read_rows()
+        if not rows:
+            messagebox.showerror("Error", "No records found.")
+            return
+
+        top = sorted(rows, key=lambda x: float(x["Score"] or 0), reverse=True)[:5]
+        msg_lines = ["Top Candidates:\n"]
+        for idx, row in enumerate(top, start=1):
+            msg_lines.append(
+                f"{idx}. {row['Name']} | Role: {row['Role']} | Final: {row['Score']} | "
+                f"ML: {row['MLScore']} | Status: {row['Status']}"
+            )
+
+        messagebox.showinfo("Top Candidates", "\n".join(msg_lines))
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = AIRResumeScreeningApp(root)
+    root.mainloop()
